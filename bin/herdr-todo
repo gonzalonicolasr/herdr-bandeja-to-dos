@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""herdr-todo: to-dos an agent leaves for you, shown in herdr's Agents sidebar.
+
+  herdr-todo add "texto"      add a to-do for the pane this runs in ($HERDR_PANE_ID)
+  herdr-todo list             list this pane's to-dos (numbered, ✔ = done)
+  herdr-todo done N           mark to-do N as done (stays visible, crossed out)
+  herdr-todo undo N           mark it pending again
+  herdr-todo rm N             delete to-do N
+  herdr-todo clear            delete the done ones (clear --all: every one)
+  herdr-todo all              list every pane's to-dos
+Add --pane <id> to act on another pane. Stored in ~/.local/state/herdr-todos.json;
+the herdr-bandeja plugin daemon picks changes up within 2 s. Done items disappear from
+the sidebar on their own after 12 h.
+"""
+import json
+import os
+import sys
+import time
+
+STORE = os.path.expanduser("~/.local/state/herdr-todos.json")
+
+
+def load():
+    try:
+        with open(STORE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    # Old format was a plain list of strings.
+    return {p: [i if isinstance(i, dict) else {"text": i} for i in items] for p, items in data.items()}
+
+
+def save(data):
+    os.makedirs(os.path.dirname(STORE), exist_ok=True)
+    data = {pane: items for pane, items in data.items() if items}
+    with open(STORE + ".tmp", "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(STORE + ".tmp", STORE)
+
+
+def show(items):
+    for n, item in enumerate(items, 1):
+        print(f"{n}. {'✔' if item.get('done') else '□'} {item['text']}")
+
+
+def main(argv):
+    pane = os.environ.get("HERDR_PANE_ID", "")
+    if "--pane" in argv:
+        i = argv.index("--pane")
+        pane = argv[i + 1]
+        del argv[i:i + 2]
+    cmd, rest = (argv[0], argv[1:]) if argv else ("list", [])
+    data = load()
+
+    if cmd == "all":
+        for p, items in data.items():
+            print(p)
+            show(items)
+        return 0
+    if not pane:
+        print("herdr-todo: no pane (run inside herdr or pass --pane <id>)", file=sys.stderr)
+        return 1
+    items = data.get(pane, [])
+    n = int(rest[0]) if rest and rest[0].isdigit() and 1 <= int(rest[0]) <= len(items) else None
+
+    if cmd in ("done", "undo", "rm") and not n:
+        print(f"herdr-todo: no hay to-do número {rest[0] if rest else '?'} (hay {len(items)})", file=sys.stderr)
+        return 1
+    if cmd == "add" and rest:
+        items.append({"text": " ".join(rest).strip()[:120]})
+    elif cmd == "done" and n:
+        items[n - 1].update(done=True, done_at=time.time())
+    elif cmd == "undo" and n:
+        items[n - 1].pop("done", None)
+        items[n - 1].pop("done_at", None)
+    elif cmd == "rm" and n:
+        items.pop(n - 1)
+    elif cmd == "clear":
+        items = [] if "--all" in rest else [i for i in items if not i.get("done")]
+    elif cmd != "list":
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    data[pane] = items
+    if cmd != "list":
+        save(data)
+    show(items)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

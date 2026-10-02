@@ -1,0 +1,32 @@
+# Pegá esto en ~/.config/herdr/config.toml y después: herdr server reload-config
+# Si ya tenés una sección [ui], sumale estas claves en vez de duplicarla.
+
+[ui]
+agent_panel_sort = "priority"
+status_indicators = "dots"
+# Resumen arriba a la derecha de la fila de pestañas.
+tab_bar_right = [
+  { type = "command", command = "cat \"${XDG_RUNTIME_DIR:-/tmp}/herdr-attn.summary\"", interval_seconds = 2, timeout_seconds = 1 },
+]
+
+# Cada agente que pide algo es una tarjetita:
+#   ▲ TE NECESITA (rojo)  ✔ LISTO (verde)  ◌ TRABAJANDO (lila)  □ TO-DOS (ámbar)
+#   space › tab
+#   ├ lo que está haciendo
+#   ╰ □ to-do que dejó el agente
+[ui.sidebar.agents]
+row_gap = 0
+rows = [
+  [
+    { token = "$attn", bold = true, fg = "#ff4d6d" },
+    { token = "$done", bold = true, fg = "#8fe645" },
+    { token = "$busy", bold = true, fg = "#9d5ce0" },
+    { token = "$todo", bold = true, fg = "#ffb347" },
+  ],
+  [{ token = "$where", fg = "#ece2fb" }],
+  [{ token = "$task", fg = "#8a73ad" }],
+  [{ token = "$t1", fg = "#f0c987" }],
+  [{ token = "$t2", fg = "#f0c987" }],
+  [{ token = "$t3", fg = "#f0c987" }],
+  [{ token = "$gap" }],
+]

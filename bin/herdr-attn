@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""herdr-attn: turns herdr's Agents sidebar into a "needs you" tray + to-dos.
+
+Every 2 s it reads herdr's agents and, per pane, reports display-only metadata
+tokens that your herdr config.toml renders (see config-snippet.toml), one token per row:
+  $attn / $done / $busy / $todo   state header (te necesita / listo /
+                                    trabajando / N to-dos for idle agents)
+  $where                            "space › tab"
+  $task                             "├ what it is doing" (terminal title)
+  $t1..$t3                          "╰ ☐ to-do text" (from herdr-todo)
+Idle agents without to-dos get no tokens, so their rows disappear. herdr sorts
+by priority, so urgent rows stay on top and to-do-only rows sink to the bottom.
+Only agents with a card are listed (agent view filtered on $order), so there are
+no invisible rows; cards sort urgent → done → working → to-dos, then by place.
+Every row is a real agent: clicking it focuses that agent. The overall summary
+goes to $XDG_RUNTIME_DIR/herdr-attn.summary, shown by ui.tab_bar_right.
+Only changes are sent; semantic state stays owned by herdr's integrations.
+A lock keeps a single instance; it exits once herdr has been gone for a minute
+(the plugin's startup hook launches it again with the next herdr server).
+"""
+import fcntl
+import json
+import os
+import socket
+import re
+import subprocess
+import time
+
+SOURCE = "bandeja.attn"
+TODO_ROWS = 3
+TOKENS = ("attn", "done", "busy", "todo", "task", "where", "gap", "order", *(f"t{i}" for i in range(1, TODO_ROWS + 1)))
+SUMMARY = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "herdr-attn.summary")
+TODOS = os.path.expanduser("~/.local/state/herdr-todos.json")
+# pi's default title ("π - gon") says nothing about the task.
+USELESS_TITLE = re.compile(r"^(π|pi)\s*-\s*\S+$")
+
+
+HERDR = os.environ.get("HERDR_BIN_PATH", "herdr")
+LOCK = os.path.expanduser("~/.local/state/herdr-bandeja.lock")
+GIVE_UP = 60  # seconds without herdr before exiting
+
+
+def herdr(*args):
+    out = subprocess.run([HERDR, *args], capture_output=True, text=True, timeout=5).stdout
+    return json.loads(out)["result"]
+
+
+DONE_TTL = 12 * 3600  # a done to-do stays visible (crossed out) this long
+
+
+def strike(text, room=36):
+    # herdr caps a token at 80 chars and every struck letter counts twice, so
+    # trim first; the sidebar is ~34 columns wide anyway.
+    text = text if len(text) <= room else text[: room - 1] + "\u2026"
+    return "".join(ch + "\u0336" for ch in text)
+
+
+def load_todos():
+    """{pane: [{"text", "done"?, "done_at"?}]}, without done items older than DONE_TTL."""
+    try:
+        with open(TODOS) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    now = time.time()
+    out = {}
+    for pane, items in data.items():
+        items = [i if isinstance(i, dict) else {"text": i} for i in items]
+        out[pane] = [i for i in items if not i.get("done") or now - i.get("done_at", now) < DONE_TTL]
+    return out
+
+
+def where(agent, spaces, tabs):
+    space = spaces.get(agent.get("workspace_id"), "")
+    tab = tabs.get(agent.get("tab_id"), "")
+    # Unnamed tabs are just numbers: they add nothing.
+    return f"{space} \u203a {tab}" if tab and not tab.isdigit() else space
+
+
+def task(agent):
+    title = (agent.get("terminal_title_stripped") or "").strip()
+    return "" if not title or USELESS_TITLE.match(title) else title
+
+
+def plural(n, one, many):
+    return f"{n} {one if n == 1 else many}"
+
+
+# Card order in the sidebar: urgent first, then by workspace › tab.
+RANK = {"attn": "0", "done": "1", "busy": "2", "todo": "3"}
+# Sidebar view: only agents that have a card, sorted by $order. herdr keeps
+# views in memory only, so it is re-applied periodically (cheap, idempotent).
+VIEW = {
+    "source": SOURCE,
+    "label": "bandeja",
+    "filter": {"op": "exists", "field": {"token": "order"}},
+    "sort": [{"field": {"token": "order"}, "order": "asc"}],
+}
+VIEW_EVERY = 30
+SOCK = os.environ.get("HERDR_SOCKET_PATH") or os.path.expanduser("~/.config/herdr/herdr.sock")
+
+
+def set_view():
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(5)
+        s.connect(SOCK)
+        s.sendall((json.dumps({"id": "attn-view", "method": "agent.view.set", "params": VIEW}) + "\n").encode())
+        s.recv(4096)
+
+
+# Header per state: (token, text). Headers are the only colored-by-state row.
+HEADS = {
+    "blocked": ("attn", "\u25b2 TE NECESITA"),
+    "done": ("done", "\u2714 LISTO"),
+    "working": ("busy", "\u25cc TRABAJANDO"),
+}
+
+
+def wanted(agents, spaces, tabs, todos):
+    """Each shown agent becomes a small card:
+        <header>                      colored by state
+        <space › tab>                 bright
+        ├ <task>                      muted lilac   (tree: ├ … ╰ last)
+        ├ □ <pending to-do>           amber
+        ╰ ✔ <d̶o̶n̶e̶ ̶t̶o̶-̶d̶o̶>               crossed out
+    Pending to-dos are listed before done ones; an idle agent whose to-dos are
+    all done still shows, with a "✔ N HECHOS" header, until they expire.
+    """
+    out = {}
+    for agent in agents:
+        items = todos.get(agent["pane_id"], [])
+        pending = [i for i in items if not i.get("done")]
+        head = HEADS.get(agent.get("agent_status"))
+        if not head and pending:
+            head = ("todo", "\u25a1 " + plural(len(pending), "TO-DO", "TO-DOS").upper())
+        elif not head and items:
+            head = ("todo", "\u2714 " + plural(len(items), "HECHO", "HECHOS").upper())
+        tokens = {}
+        if head:
+            name, text = head
+            tokens[name] = text
+            tokens["where"] = where(agent, spaces, tabs)
+            tokens["order"] = RANK[name] + tokens["where"].lstrip("~").lower()
+            branch = [("task", task(agent))] if task(agent) else []
+            ordered = pending + [i for i in items if i.get("done")]
+            lines = ["\u2714 " + strike(i["text"]) if i.get("done") else "\u25a1 " + i["text"] for i in ordered]
+            shown = lines[:TODO_ROWS]
+            if len(lines) > TODO_ROWS:
+                shown[-1] = f"{shown[-1]}  (+{len(lines) - TODO_ROWS})"
+            branch += [(f"t{i}", t) for i, t in enumerate(shown, 1)]
+            for i, (key, text) in enumerate(branch):
+                tokens[key] = ("\u2570 " if i == len(branch) - 1 else "\u251c ") + text
+            # Blank-looking spacer line under each card. U+2800 is not whitespace,
+            # so herdr keeps it; row_gap stays 0 so hidden agents take no rows.
+            tokens["gap"] = "\u2800"
+        out[agent["pane_id"]] = tokens
+    return out
+
+
+def summary(agents, todos):
+    count = lambda s: sum(a.get("agent_status") == s for a in agents)
+    blocked, done, busy = count("blocked"), count("done"), count("working")
+    live = {a["pane_id"] for a in agents}
+    pending = sum(not i.get("done") for pane, items in todos.items() if pane in live for i in items)
+    parts = []
+    if blocked:
+        parts.append("\u25b2 " + plural(blocked, "te necesita", "te necesitan"))
+    if done:
+        parts.append(plural(done, "listo", "listos"))
+    if not parts:
+        parts.append("\u2713 nadie te espera")
+    if pending:
+        parts.append(plural(pending, "to-do", "to-dos"))
+    if busy:
+        parts.append(f"{busy} trabajando")
+    return " \u00b7 ".join(parts)
+
+
+def report(pane, tokens):
+    args = ["pane", "report-metadata", pane, "--source", SOURCE]
+    for name in TOKENS:
+        args += ["--token", f"{name}={tokens[name]}"] if tokens.get(name) else ["--clear-token", name]
+    subprocess.run([HERDR, *args], capture_output=True, timeout=5)
+
+
+def main():
+    os.makedirs(os.path.dirname(LOCK), exist_ok=True)
+    lock = open(LOCK, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return
+    sent = {}
+    last_view = 0.0
+    last_ok = time.time()
+    while True:
+        try:
+            if time.time() - last_view > VIEW_EVERY:
+                set_view()
+                last_view = time.time()
+            spaces = {w["workspace_id"]: w["label"] for w in herdr("workspace", "list")["workspaces"]}
+            tabs = {t["tab_id"]: t.get("label", "") for t in herdr("tab", "list")["tabs"]}
+            agents = herdr("agent", "list")["agents"]
+            todos = load_todos()
+            for pane, tokens in wanted(agents, spaces, tabs, todos).items():
+                if sent.get(pane) != tokens:
+                    report(pane, tokens)
+                    sent[pane] = tokens
+            with open(SUMMARY + ".tmp", "w") as f:
+                f.write(summary(agents, todos) + "\n")
+            os.replace(SUMMARY + ".tmp", SUMMARY)
+            live = {a["pane_id"] for a in agents}
+            for pane in [p for p in sent if p not in live]:
+                del sent[pane]
+            last_ok = time.time()
+        except Exception:
+            if time.time() - last_ok > GIVE_UP:
+                return
+            # herdr restarting or not up yet: retry next tick.
+            sent.clear()
+            last_view = 0.0
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()
