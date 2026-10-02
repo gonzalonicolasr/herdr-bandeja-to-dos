@@ -30,3 +30,10 @@ rows = [
   [{ token = "$t3", fg = "#f0c987" }],
   [{ token = "$gap" }],
 ]
+
+# Popup para marcar to-dos como listos con un click (z deshace).
+[[keys.command]]
+key = "prefix+t"
+type = "plugin_action"
+command = "bandeja.todos"
+description = "to-dos: marcar como listos"

@@ -1,6 +1,6 @@
 id = "bandeja"
 name = "bandeja"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.8.2"
 description = "Bandeja de agentes en el sidebar: quién te necesita, quién terminó, quién trabaja y los to-dos que te dejan"
 platforms = ["linux", "macos"]
@@ -12,3 +12,16 @@ command = ["sh", "start.sh"]
 id = "start"
 title = "Arrancar la bandeja"
 command = ["sh", "start.sh"]
+
+[[actions]]
+id = "todos"
+title = "To-dos: marcar como listos"
+command = ["sh", "-c", "exec \"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin bandeja --entrypoint todos"]
+
+[[panes]]
+id = "todos"
+title = "To-dos"
+placement = "popup"
+width = "60%"
+height = "60%"
+command = ["python3", "bin/herdr-todo-ui"]

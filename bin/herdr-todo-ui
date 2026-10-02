@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+import curses
+import json
+import os
+import subprocess
+import time
+
+STORE = os.path.expanduser("~/.local/state/herdr-todos.json")
+HERDR = os.environ.get("HERDR_BIN_PATH", "herdr")
+
+
+def load():
+    try:
+        with open(STORE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return {p: [i if isinstance(i, dict) else {"text": i} for i in items] for p, items in data.items()}
+
+
+def save(data):
+    data = {pane: items for pane, items in data.items() if items}
+    with open(STORE + ".tmp", "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(STORE + ".tmp", STORE)
+
+
+def herdr(*args):
+    try:
+        out = subprocess.run([HERDR, *args], capture_output=True, text=True, timeout=5).stdout
+        return json.loads(out)["result"]
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        return None
+
+
+def places():
+    agents = herdr("agent", "list")
+    if agents is None:
+        return None
+    spaces = {w["workspace_id"]: w["label"] for w in (herdr("workspace", "list") or {}).get("workspaces", [])}
+    tabs = {t["tab_id"]: t.get("label", "") for t in (herdr("tab", "list") or {}).get("tabs", [])}
+    out = {}
+    for a in agents["agents"]:
+        space, tab = spaces.get(a.get("workspace_id"), ""), tabs.get(a.get("tab_id"), "")
+        out[a["pane_id"]] = f"{space} › {tab}" if tab and not tab.isdigit() else space or a["pane_id"]
+    return out
+
+
+def rows(data, where):
+    out = []
+    panes = [p for p in data if where is None or p in where]
+    for pane in sorted(panes, key=lambda p: (where or {}).get(p, p).lower()):
+        out.append(("head", (where or {}).get(pane, pane), pane, -1))
+        out += [("item", item["text"], pane, i) for i, item in enumerate(data[pane])]
+    return out
+
+
+def toggle(pane, index, undo):
+    data = load()
+    items = data.get(pane, [])
+    if index >= len(items):
+        return None
+    item = items[index]
+    undo.append((pane, item["text"], dict(item)))
+    if item.get("done"):
+        item.pop("done", None)
+        item.pop("done_at", None)
+        msg = "pendiente otra vez: "
+    else:
+        item.update(done=True, done_at=time.time())
+        msg = "listo: "
+    save(data)
+    return msg + item["text"]
+
+
+def restore(undo):
+    if not undo:
+        return "nada para deshacer"
+    pane, text, before = undo.pop()
+    data = load()
+    for i, item in enumerate(data.get(pane, [])):
+        if item["text"] == text:
+            data[pane][i] = before
+            save(data)
+            return "deshecho: " + text
+    return "ese to-do ya no está"
+
+
+def main(scr):
+    curses.curs_set(0)
+    curses.use_default_colors()
+    curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+    curses.mouseinterval(0)
+    rich = curses.COLORS >= 256
+    bg = 234 if rich else 0
+    for n, (fg256, fg8) in enumerate([(214, 3), (114, 2), (141, 5), (245, 7)], 1):
+        curses.init_pair(n, fg256 if rich else fg8, bg)
+    amber, green, lilac, grey = (curses.color_pair(n) for n in range(1, 5))
+    scr.bkgd(" ", grey)
+    scr.timeout(2000)
+    sel, top, undo, note = 0, 0, [], ""
+    where = places()
+    last_places = time.time()
+    while True:
+        if time.time() - last_places > 10:
+            where, last_places = places(), time.time()
+        data = load()
+        lines = rows(data, where)
+        items = [n for n, r in enumerate(lines) if r[0] == "item"]
+        sel = min(sel, len(items) - 1) if items else 0
+        h, w = scr.getmaxyx()
+        body = max(1, h - 4)
+        cur = items[sel] if items else -1
+        if cur >= 0:
+            top = min(max(top, cur - body + 1), cur)
+        scr.erase()
+        pending = sum(1 for r in lines if r[0] == "item" and not data[r[2]][r[3]].get("done"))
+        scr.addnstr(0, 1, f"TO-DOS · {pending} pendientes", w - 2, amber | curses.A_BOLD)
+        scr.addnstr(1, 1, "click o enter = listo/volver · z deshacer · q salir", w - 2, grey)
+        hits = {}
+        for y, n in enumerate(range(top, min(len(lines), top + body)), 2):
+            kind, text, pane, i = lines[n]
+            if kind == "head":
+                scr.addnstr(y, 1, text, w - 2, lilac | curses.A_BOLD)
+                continue
+            done = data[pane][i].get("done")
+            attr = (green | curses.A_DIM) if done else amber
+            if n == cur:
+                attr |= curses.A_REVERSE
+            scr.addnstr(y, 3, ("✔ " if done else "□ ") + text, w - 4, attr)
+            hits[y] = (pane, i, items.index(n))
+        if not lines:
+            scr.addnstr(3, 3, "no hay to-dos ✔", w - 4, green)
+        scr.addnstr(h - 1, 1, note, w - 2, grey)
+        scr.refresh()
+        try:
+            key = scr.get_wch()
+        except curses.error:
+            continue
+        if key == "\x1b":
+            scr.nodelay(True)
+            seq = ""
+            while len(seq) < 2:
+                try:
+                    seq += scr.get_wch()
+                except curses.error:
+                    break
+            scr.nodelay(False)
+            scr.timeout(2000)
+            if not seq:
+                return
+            key = {"[A": curses.KEY_UP, "OA": curses.KEY_UP, "[B": curses.KEY_DOWN, "OB": curses.KEY_DOWN}.get(seq, "")
+        if key in ("q", "Q"):
+            return
+        if key in ("j", curses.KEY_DOWN) and items:
+            sel = min(sel + 1, len(items) - 1)
+        elif key in ("k", curses.KEY_UP) and items:
+            sel = max(sel - 1, 0)
+        elif key in ("\n", " ", curses.KEY_ENTER) and items:
+            _, _, pane, i = lines[items[sel]]
+            note = toggle(pane, i, undo) or note
+        elif key in ("z", "u"):
+            note = restore(undo)
+        elif key == curses.KEY_MOUSE:
+            try:
+                _, _, my, _, bstate = curses.getmouse()
+            except curses.error:
+                continue
+            if bstate & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED) and my in hits:
+                pane, i, sel = hits[my]
+                note = toggle(pane, i, undo) or note
+            elif bstate & curses.BUTTON4_PRESSED and items:
+                sel = max(sel - 1, 0)
+            elif bstate & getattr(curses, "BUTTON5_PRESSED", 0) and items:
+                sel = min(sel + 1, len(items) - 1)
+
+
+if __name__ == "__main__":
+    os.environ.setdefault("ESCDELAY", "150")
+    curses.wrapper(main)

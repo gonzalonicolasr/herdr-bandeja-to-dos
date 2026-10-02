@@ -84,6 +84,27 @@ Pegá esto en tu `CLAUDE.md` / `AGENTS.md` global:
 > `herdr-todo add "texto corto y accionable"`. No lo uses para tus propias
 > tareas. Si ya está hecho o no aplica, `herdr-todo done N`.
 
+## Marcarlos como listos con un click
+
+`prefix+t` (o la acción *To-dos: marcar como listos* del plugin) abre un popup con
+los to-dos de todos tus agentes, agrupados por pestaña:
+
+- **Click** (o Enter/espacio) en un to-do lo marca como listo. **Otro click lo
+  vuelve a pendiente**: los renglones no cambian de lugar, así que un click errado
+  se arregla clickeando lo mismo.
+- **`z`** deshace el último cambio (y el anterior, y así).
+- **`q`** o **Esc** cierra.
+
+El atajo va en tu `config.toml` (está en `config-snippet.toml`):
+
+```toml
+[[keys.command]]
+key = "prefix+t"
+type = "plugin_action"
+command = "bandeja.todos"
+description = "to-dos: marcar como listos"
+```
+
 ## Cómo funciona
 
 - `bin/herdr-attn` es un daemon chiquito: cada 2 s lee los agentes
