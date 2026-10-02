@@ -4,6 +4,8 @@ Convierte el panel **agents** del sidebar de herdr en una bandeja de "quién te
 necesita": cada agente que requiere algo de vos aparece como una tarjetita, y los
 agentes pueden dejarte **to-dos** que se ven en su tarjeta.
 
+![La bandeja en el sidebar de herdr y los to-dos](docs/bandeja.png)
+
 ```
 ▲ TE NECESITA            ← rojo: el agente está bloqueado esperándote
 misc › Spanish help
