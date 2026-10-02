@@ -33,10 +33,10 @@ Arriba a la derecha de la fila de pestañas queda un resumen:
 1. Instalá el plugin:
 
    ```bash
-   herdr plugin install gonzalonicolasr/herdr-bandeja --yes
+   herdr plugin install gonzalonicolasr/herdr-bandeja-to-dos --yes
    ```
 
-   (o, si te pasaron la carpeta: `herdr plugin link /ruta/a/herdr-bandeja`)
+   (o, si te pasaron la carpeta: `herdr plugin link /ruta/a/herdr-bandeja-to-dos`)
 
 2. Pegá el contenido de [`config-snippet.toml`](config-snippet.toml) en
    `~/.config/herdr/config.toml`. Si ya tenés una sección `[ui]`, sumale las
